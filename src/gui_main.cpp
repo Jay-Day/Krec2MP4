@@ -13,6 +13,7 @@
 
 #include "converter.h"
 #include "emulator.h"
+#include "ffmpeg_encoder.h"
 #include "gui_resources.h"
 
 // Enable visual styles (common controls v6) + DPI awareness via embedded manifest
@@ -79,20 +80,8 @@ static const wchar_t* g_msaa_labels[] = { L"Off", L"2x", L"4x", L"8x", L"16x" };
 static const int g_aniso_values[] = { 0, 2, 4, 8, 16 };
 static const wchar_t* g_aniso_labels[] = { L"Off", L"2x", L"4x", L"8x", L"16x" };
 
-// Encoder presets
-struct EncoderPreset {
-    const wchar_t* label;
-    const char* codec;
-};
-static const EncoderPreset g_encoders[] = {
-    { L"H.264 (CPU)",        "libx264" },
-    { L"H.265 (CPU)",        "libx265" },
-    { L"H.264 (AMD GPU)",    "h264_amf" },
-    { L"H.265 (AMD GPU)",    "hevc_amf" },
-    { L"H.264 (NVIDIA GPU)", "h264_nvenc" },
-    { L"H.265 (NVIDIA GPU)", "hevc_nvenc" },
-};
-static const int g_num_encoders = sizeof(g_encoders) / sizeof(g_encoders[0]);
+// Available encoders (probed at startup)
+static std::vector<EncoderInfo> g_encoders;
 
 // --- Helpers ---
 
@@ -131,8 +120,19 @@ static void AppendLog(const wchar_t* text) {
     SendMessageW(g_log_edit, EM_REPLACESEL, FALSE, (LPARAM)text);
 }
 
+// Get the parent directory of a path currently in an edit control (for initial browse dir)
+static std::wstring GetEditDir(HWND edit) {
+    std::string text = GetEditText(edit);
+    if (text.empty()) return {};
+    fs::path p(text);
+    fs::path dir = fs::is_directory(p) ? p : p.parent_path();
+    if (fs::is_directory(dir)) return dir.wstring();
+    return {};
+}
+
 static std::wstring BrowseFile(HWND owner, const wchar_t* title, const wchar_t* filter, bool save,
-                               const wchar_t* defExt = nullptr) {
+                               const wchar_t* defExt = nullptr,
+                               const wchar_t* initialDir = nullptr) {
     wchar_t buf[MAX_PATH] = {};
     OPENFILENAMEW ofn = {};
     ofn.lStructSize = sizeof(ofn);
@@ -142,6 +142,7 @@ static std::wstring BrowseFile(HWND owner, const wchar_t* title, const wchar_t* 
     ofn.nMaxFile = MAX_PATH;
     ofn.lpstrTitle = title;
     ofn.lpstrDefExt = defExt;
+    ofn.lpstrInitialDir = initialDir;
     if (save) {
         ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
         if (GetSaveFileNameW(&ofn)) return buf;
@@ -152,7 +153,8 @@ static std::wstring BrowseFile(HWND owner, const wchar_t* title, const wchar_t* 
     return {};
 }
 
-static std::wstring BrowseFolder(HWND owner, const wchar_t* title) {
+static std::wstring BrowseFolder(HWND owner, const wchar_t* title,
+                                 const wchar_t* initialDir = nullptr) {
     std::wstring result;
     IFileDialog* pfd = nullptr;
     HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
@@ -162,6 +164,14 @@ static std::wstring BrowseFolder(HWND owner, const wchar_t* title) {
         pfd->GetOptions(&opts);
         pfd->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
         pfd->SetTitle(title);
+        if (initialDir && initialDir[0]) {
+            IShellItem* psi_dir = nullptr;
+            if (SUCCEEDED(SHCreateItemFromParsingName(initialDir, nullptr,
+                          IID_IShellItem, (void**)&psi_dir))) {
+                pfd->SetFolder(psi_dir);
+                psi_dir->Release();
+            }
+        }
         hr = pfd->Show(owner);
         if (SUCCEEDED(hr)) {
             IShellItem* psi = nullptr;
@@ -177,6 +187,136 @@ static std::wstring BrowseFolder(HWND owner, const wchar_t* title) {
         pfd->Release();
     }
     return result;
+}
+
+// --- Settings persistence (INI file next to exe) ---
+
+static std::wstring GetIniPath() {
+    std::wstring path = Utf8ToWide(get_exe_dir());
+    path += L"Krec2MP4.ini";
+    return path;
+}
+
+static void SaveSettings() {
+    std::wstring ini = GetIniPath();
+    const wchar_t* file = ini.c_str();
+    const wchar_t* sec = L"Settings";
+
+    // Paths
+    wchar_t buf[MAX_PATH] = {};
+    GetWindowTextW(g_rom_path, buf, MAX_PATH);
+    WritePrivateProfileStringW(sec, L"RomPath", buf, file);
+    GetWindowTextW(g_input_path, buf, MAX_PATH);
+    WritePrivateProfileStringW(sec, L"InputPath", buf, file);
+    GetWindowTextW(g_output_path, buf, MAX_PATH);
+    WritePrivateProfileStringW(sec, L"OutputPath", buf, file);
+
+    // Checkboxes
+    bool batch = (SendMessageW(g_batch_check, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    WritePrivateProfileStringW(sec, L"Batch", batch ? L"1" : L"0", file);
+    bool verbose = (SendMessageW(g_verbose_check, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    WritePrivateProfileStringW(sec, L"Verbose", verbose ? L"1" : L"0", file);
+
+    // Resolution (save index)
+    int res_sel = (int)SendMessageW(g_resolution_combo, CB_GETCURSEL, 0, 0);
+    wchar_t num[16];
+    swprintf(num, 16, L"%d", res_sel);
+    WritePrivateProfileStringW(sec, L"Resolution", num, file);
+
+    // Encoder (save codec name so it survives encoder list changes)
+    int enc_sel = (int)SendMessageW(g_encoder_combo, CB_GETCURSEL, 0, 0);
+    if (enc_sel >= 0 && enc_sel < (int)g_encoders.size()) {
+        WritePrivateProfileStringW(sec, L"Encoder",
+            Utf8ToWide(g_encoders[enc_sel].codec).c_str(), file);
+    }
+
+    // CRF
+    int crf = (int)SendMessageW(g_crf_slider, TBM_GETPOS, 0, 0);
+    swprintf(num, 16, L"%d", crf);
+    WritePrivateProfileStringW(sec, L"CRF", num, file);
+
+    // FPS
+    GetWindowTextW(g_fps_edit, buf, MAX_PATH);
+    WritePrivateProfileStringW(sec, L"FPS", buf, file);
+
+    // MSAA
+    int msaa = (int)SendMessageW(g_msaa_slider, TBM_GETPOS, 0, 0);
+    swprintf(num, 16, L"%d", msaa);
+    WritePrivateProfileStringW(sec, L"MSAA", num, file);
+
+    // Aniso
+    int aniso = (int)SendMessageW(g_aniso_slider, TBM_GETPOS, 0, 0);
+    swprintf(num, 16, L"%d", aniso);
+    WritePrivateProfileStringW(sec, L"Aniso", num, file);
+}
+
+static void LoadSettings() {
+    std::wstring ini = GetIniPath();
+    const wchar_t* file = ini.c_str();
+    const wchar_t* sec = L"Settings";
+
+    // Check if INI exists
+    if (GetFileAttributesW(file) == INVALID_FILE_ATTRIBUTES) return;
+
+    wchar_t buf[MAX_PATH] = {};
+
+    // Paths
+    GetPrivateProfileStringW(sec, L"RomPath", L"", buf, MAX_PATH, file);
+    if (buf[0]) SetWindowTextW(g_rom_path, buf);
+    GetPrivateProfileStringW(sec, L"InputPath", L"", buf, MAX_PATH, file);
+    if (buf[0]) SetWindowTextW(g_input_path, buf);
+    GetPrivateProfileStringW(sec, L"OutputPath", L"", buf, MAX_PATH, file);
+    if (buf[0]) SetWindowTextW(g_output_path, buf);
+
+    // Checkboxes
+    int batch = GetPrivateProfileIntW(sec, L"Batch", 0, file);
+    SendMessageW(g_batch_check, BM_SETCHECK, batch ? BST_CHECKED : BST_UNCHECKED, 0);
+    int verbose = GetPrivateProfileIntW(sec, L"Verbose", 0, file);
+    SendMessageW(g_verbose_check, BM_SETCHECK, verbose ? BST_CHECKED : BST_UNCHECKED, 0);
+
+    // Resolution
+    int res_sel = GetPrivateProfileIntW(sec, L"Resolution", 1, file);
+    if (res_sel >= 0 && res_sel < g_num_res_presets)
+        SendMessageW(g_resolution_combo, CB_SETCURSEL, res_sel, 0);
+
+    // Encoder (match by codec name)
+    GetPrivateProfileStringW(sec, L"Encoder", L"", buf, MAX_PATH, file);
+    if (buf[0]) {
+        std::string saved_codec = WideToUtf8(buf);
+        for (size_t i = 0; i < g_encoders.size(); i++) {
+            if (saved_codec == g_encoders[i].codec) {
+                SendMessageW(g_encoder_combo, CB_SETCURSEL, i, 0);
+                break;
+            }
+        }
+    }
+
+    // CRF
+    int crf = GetPrivateProfileIntW(sec, L"CRF", 23, file);
+    if (crf >= 0 && crf <= 51) {
+        SendMessageW(g_crf_slider, TBM_SETPOS, TRUE, crf);
+        wchar_t num[8];
+        swprintf(num, 8, L"%d", crf);
+        SetWindowTextW(g_crf_value, num);
+    }
+
+    // FPS
+    GetPrivateProfileStringW(sec, L"FPS", L"0", buf, MAX_PATH, file);
+    SetWindowTextW(g_fps_edit, buf);
+
+    // MSAA
+    int msaa = GetPrivateProfileIntW(sec, L"MSAA", 0, file);
+    if (msaa >= 0 && msaa <= 4) {
+        SendMessageW(g_msaa_slider, TBM_SETPOS, TRUE, msaa);
+        SetWindowTextW(g_msaa_value, g_msaa_labels[msaa]);
+    }
+
+    // Aniso
+    int aniso = GetPrivateProfileIntW(sec, L"Aniso", 0, file);
+    if (aniso >= 0 && aniso <= 4) {
+        SendMessageW(g_aniso_slider, TBM_SETPOS, TRUE, aniso);
+        SetWindowTextW(g_aniso_value, g_aniso_labels[aniso]);
+    }
 }
 
 // --- Create Controls ---
@@ -270,7 +410,7 @@ static void CreateControls(HWND hwnd) {
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
         EDIT_X, y, 200, 200, hwnd, (HMENU)(INT_PTR)IDC_ENCODER, nullptr, nullptr);
     SendMessageW(g_encoder_combo, WM_SETFONT, (WPARAM)g_font, TRUE);
-    for (int i = 0; i < g_num_encoders; i++) {
+    for (size_t i = 0; i < g_encoders.size(); i++) {
         SendMessageW(g_encoder_combo, CB_ADDSTRING, 0, (LPARAM)g_encoders[i].label);
     }
     SendMessageW(g_encoder_combo, CB_SETCURSEL, 0, 0); // H.264 (CPU)
@@ -470,7 +610,7 @@ static AppConfig ReadConfig() {
 
     // Encoder
     int enc_sel = (int)SendMessageW(g_encoder_combo, CB_GETCURSEL, 0, 0);
-    if (enc_sel >= 0 && enc_sel < g_num_encoders) {
+    if (enc_sel >= 0 && enc_sel < (int)g_encoders.size()) {
         cfg.encoder = g_encoders[enc_sel].codec;
     }
 
@@ -530,6 +670,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     switch (msg) {
     case WM_CREATE:
         CreateControls(hwnd);
+        LoadSettings();
         return 0;
 
     case WM_HSCROLL: {
@@ -568,31 +709,39 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         switch (id) {
         case IDC_ROM_BROWSE: {
+            std::wstring dir = GetEditDir(g_rom_path);
             auto f = BrowseFile(hwnd, L"Select ROM",
-                L"N64 ROM Files (*.z64;*.n64;*.v64)\0*.z64;*.n64;*.v64\0All Files\0*.*\0", false);
+                L"N64 ROM Files (*.z64;*.n64;*.v64)\0*.z64;*.n64;*.v64\0All Files\0*.*\0", false,
+                nullptr, dir.empty() ? nullptr : dir.c_str());
             if (!f.empty()) SetWindowTextW(g_rom_path, f.c_str());
             break;
         }
         case IDC_INPUT_BROWSE: {
+            std::wstring dir = GetEditDir(g_input_path);
             bool batch = (SendMessageW(g_batch_check, BM_GETCHECK, 0, 0) == BST_CHECKED);
             if (batch) {
-                auto f = BrowseFolder(hwnd, L"Select input folder");
+                auto f = BrowseFolder(hwnd, L"Select input folder",
+                    dir.empty() ? nullptr : dir.c_str());
                 if (!f.empty()) SetWindowTextW(g_input_path, f.c_str());
             } else {
                 auto f = BrowseFile(hwnd, L"Select .krec file",
-                    L"Krec Files (*.krec)\0*.krec\0All Files\0*.*\0", false);
+                    L"Krec Files (*.krec)\0*.krec\0All Files\0*.*\0", false,
+                    nullptr, dir.empty() ? nullptr : dir.c_str());
                 if (!f.empty()) SetWindowTextW(g_input_path, f.c_str());
             }
             break;
         }
         case IDC_OUTPUT_BROWSE: {
+            std::wstring dir = GetEditDir(g_output_path);
             bool batch = (SendMessageW(g_batch_check, BM_GETCHECK, 0, 0) == BST_CHECKED);
             if (batch) {
-                auto f = BrowseFolder(hwnd, L"Select output folder");
+                auto f = BrowseFolder(hwnd, L"Select output folder",
+                    dir.empty() ? nullptr : dir.c_str());
                 if (!f.empty()) SetWindowTextW(g_output_path, f.c_str());
             } else {
                 auto f = BrowseFile(hwnd, L"Save output .mp4",
-                    L"MP4 Video (*.mp4)\0*.mp4\0All Files\0*.*\0", true, L"mp4");
+                    L"MP4 Video (*.mp4)\0*.mp4\0All Files\0*.*\0", true, L"mp4",
+                    dir.empty() ? nullptr : dir.c_str());
                 if (!f.empty()) SetWindowTextW(g_output_path, f.c_str());
             }
             break;
@@ -688,6 +837,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_cancel_flag.store(true);
             if (g_worker_thread.joinable()) g_worker_thread.join();
         }
+        SaveSettings();
         DestroyWindow(hwnd);
         return 0;
 
@@ -712,6 +862,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     icc.dwSize = sizeof(icc);
     icc.dwICC = ICC_BAR_CLASSES | ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&icc);
+
+    // Probe available encoders (tests GPU encoders against ffmpeg)
+    std::string exe_dir_init = get_exe_dir();
+    g_encoders = probe_available_encoders(exe_dir_init + "ffmpeg.exe");
 
     // Create UI font
     g_font = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,

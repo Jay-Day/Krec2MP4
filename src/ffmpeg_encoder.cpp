@@ -3,6 +3,71 @@
 #include <cstring>
 #include <string>
 
+// All known encoders
+static const EncoderInfo g_all_encoders[] = {
+    { L"H.264 (CPU)",        "libx264",    false },
+    { L"H.265 (CPU)",        "libx265",    false },
+    { L"H.264 (AMD GPU)",    "h264_amf",   true },
+    { L"H.265 (AMD GPU)",    "hevc_amf",   true },
+    { L"H.264 (NVIDIA GPU)", "h264_nvenc", true },
+    { L"H.265 (NVIDIA GPU)", "hevc_nvenc", true },
+};
+
+#ifdef _WIN32
+#include <windows.h>
+
+// Test if a hardware encoder works by running a minimal FFmpeg encode
+static bool probe_encoder(const std::string& ffmpeg_path, const char* codec) {
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+        "\"%s\" -v quiet -f lavfi -i color=black:s=256x256:d=0.1 -frames:v 1 -c:v %s -f null -",
+        ffmpeg_path.c_str(), codec);
+
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessA(nullptr, cmd, nullptr, nullptr, TRUE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        return false;
+    }
+
+    WaitForSingleObject(pi.hProcess, 5000);
+    DWORD exit_code = 1;
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return exit_code == 0;
+}
+
+#else
+
+static bool probe_encoder(const std::string& ffmpeg_path, const char* codec) {
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd),
+        "\"%s\" -v quiet -f lavfi -i nullsrc=s=16x16:d=0.01 -frames:v 1 -c:v %s -f null - 2>/dev/null",
+        ffmpeg_path.c_str(), codec);
+    return system(cmd) == 0;
+}
+
+#endif
+
+std::vector<EncoderInfo> probe_available_encoders(const std::string& ffmpeg_path) {
+    std::vector<EncoderInfo> available;
+    for (const auto& enc : g_all_encoders) {
+        if (!enc.hw) {
+            available.push_back(enc);
+        } else if (probe_encoder(ffmpeg_path, enc.codec)) {
+            available.push_back(enc);
+        }
+    }
+    return available;
+}
+
 // Build encoder-specific quality/preset flags for FFmpeg
 static std::string build_encoder_flags(const std::string& encoder, int crf) {
     if (encoder == "libx264") {

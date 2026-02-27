@@ -1,6 +1,18 @@
 #pragma once
 #include <cstdint>
 #include <string>
+#include <vector>
+
+struct EncoderInfo {
+    const wchar_t* label;
+    const char* codec;
+    bool hw;  // true = needs hardware probe
+};
+
+// Returns the subset of known encoders available on this system.
+// CPU encoders are always included; GPU encoders are tested by running
+// a quick FFmpeg encode and checking the exit code.
+std::vector<EncoderInfo> probe_available_encoders(const std::string& ffmpeg_path);
 
 struct FFmpegConfig {
     std::string ffmpeg_path = "ffmpeg";
