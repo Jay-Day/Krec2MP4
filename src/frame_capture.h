@@ -21,5 +21,8 @@ void frame_capture_set_cancel_flag(std::atomic<bool>* flag);
 // The VI frame callback registered with the core.
 void frame_capture_callback(unsigned int frame_index);
 
+// Flush the last PBO-buffered frame. Call after emulation stops, before closing encoder.
+void frame_capture_flush();
+
 // Get the number of frames captured so far.
 int frame_capture_count();

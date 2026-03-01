@@ -143,8 +143,8 @@ static m64p_error VidExt_GLSetAttr(m64p_GLattr attr, int value) {
         case M64P_GL_BLUE_SIZE:             s_gl_blue_size = value; break;
         case M64P_GL_ALPHA_SIZE:            s_gl_alpha_size = value; break;
         case M64P_GL_SWAP_CONTROL:          s_gl_swap_interval = 0; break; // always 0 for headless
-        case M64P_GL_MULTISAMPLEBUFFERS:    s_gl_multisample_buffers = value; break;
-        case M64P_GL_MULTISAMPLESAMPLES:    s_gl_multisample_samples = value; break;
+        case M64P_GL_MULTISAMPLEBUFFERS:    s_gl_multisample_buffers = 0; break; // force 0: GLideN64 handles MSAA in its own FBOs; multisampled default FB breaks glReadPixels
+        case M64P_GL_MULTISAMPLESAMPLES:    s_gl_multisample_samples = 0; break;
         case M64P_GL_CONTEXT_MAJOR_VERSION: s_gl_major = value; break;
         case M64P_GL_CONTEXT_MINOR_VERSION: s_gl_minor = value; break;
         case M64P_GL_CONTEXT_PROFILE_MASK:  s_gl_profile = value; break;

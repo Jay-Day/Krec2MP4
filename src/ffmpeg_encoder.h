@@ -3,10 +3,34 @@
 #include <string>
 #include <vector>
 
+enum class EncoderFamily {
+    X264_X265,  // libx264, libx265 — CRF 0-51
+    AMF,        // h264_amf, hevc_amf — QP 0-51
+    AMF_AV1,    // av1_amf — QP 0-255
+    NVENC,      // h264_nvenc, hevc_nvenc — CQ 0-51
+    NVENC_AV1,  // av1_nvenc — CQ 0-255
+};
+
+struct QualityPreset {
+    const char* name;   // e.g. "Medium"
+    int value;          // e.g. 23 or 115
+};
+
+struct QualityFamily {
+    EncoderFamily family;
+    const char* param_name;         // "CRF", "QP", or "CQ"
+    const QualityPreset* presets;
+    int num_presets;
+    int default_index;              // index of default preset
+};
+
+const QualityFamily& get_quality_family(EncoderFamily family);
+
 struct EncoderInfo {
     const wchar_t* label;
     const char* codec;
     bool hw;  // true = needs hardware probe
+    EncoderFamily family;
 };
 
 // Returns the subset of known encoders available on this system.

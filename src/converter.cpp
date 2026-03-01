@@ -146,9 +146,10 @@ bool check_ffmpeg(const std::string& ffmpeg_path) {
 }
 
 std::string make_output_path(const std::string& input_path, const std::string& output_path) {
-    if (!output_path.empty()) return output_path;
-    fs::path p(input_path);
-    p.replace_extension(".mp4");
+    fs::path p = output_path.empty() ? fs::path(input_path) : fs::path(output_path);
+    if (p.extension() != ".mp4") {
+        p.replace_extension(".mp4");
+    }
     return p.string();
 }
 
@@ -382,6 +383,9 @@ bool convert_one(const std::string& krec_path, const std::string& output_path,
 
     converter_log(LOG_INFO, "Running emulation (%d input frames)...", krec.total_input_frames);
     m64p_error ret = emu.execute();
+
+    // Flush last PBO-buffered frame before closing encoder
+    frame_capture_flush();
 
     int frames_captured = frame_capture_count();
     converter_log(LOG_INFO, "Emulation finished. Captured %d frames.", frames_captured);
