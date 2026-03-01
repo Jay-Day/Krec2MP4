@@ -43,6 +43,7 @@ target_link_libraries(Krec2MP4Lib PUBLIC
 # --- CLI executable ---
 add_executable(Krec2MP4
     src/main.cpp
+    res/app.rc
 )
 
 target_link_libraries(Krec2MP4 PRIVATE
@@ -65,6 +66,7 @@ set_target_properties(AudioCapturePlugin PROPERTIES
 if(WIN32)
     add_executable(Krec2MP4_GUI WIN32
         src/gui_main.cpp
+        res/app.rc
     )
 
     target_link_libraries(Krec2MP4_GUI PRIVATE

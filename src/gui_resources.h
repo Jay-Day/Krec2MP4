@@ -1,5 +1,8 @@
 #pragma once
 
+// Icon resource ID (must match res/app.rc)
+#define IDI_APPICON 1
+
 // Control IDs
 #define IDC_ROM_PATH        101
 #define IDC_ROM_BROWSE      102

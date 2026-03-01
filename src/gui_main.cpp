@@ -984,7 +984,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_APPICON));
+    wc.hIconSm = (HICON)LoadImage(hInstance, MAKEINTRESOURCE(IDI_APPICON),
+                                   IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     wc.lpszClassName = L"Krec2MP4_GUI";
