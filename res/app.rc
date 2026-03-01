@@ -1,0 +1,3 @@
+#include "../src/gui_resources.h"
+
+IDI_APPICON ICON "app.ico"

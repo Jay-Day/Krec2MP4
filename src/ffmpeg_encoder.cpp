@@ -3,14 +3,49 @@
 #include <cstring>
 #include <string>
 
+// Quality presets for 0-51 range encoders (X264_X265, AMF, NVENC)
+static const QualityPreset g_presets_51[] = {
+    { "Highest", 0 },
+    { "High",   18 },
+    { "Medium", 23 },
+    { "Low",    28 },
+    { "Lowest", 36 },
+};
+
+// Quality presets for 0-255 range encoders (AMF_AV1, NVENC_AV1)
+static const QualityPreset g_presets_255[] = {
+    { "Highest",  0 },
+    { "High",    90 },
+    { "Medium", 115 },
+    { "Low",    140 },
+    { "Lowest", 180 },
+};
+
+static const QualityFamily g_quality_families[] = {
+    { EncoderFamily::X264_X265, "CRF", g_presets_51,  5, 2 },
+    { EncoderFamily::AMF,       "QP",  g_presets_51,  5, 2 },
+    { EncoderFamily::AMF_AV1,   "QP",  g_presets_255, 5, 2 },
+    { EncoderFamily::NVENC,     "CQ",  g_presets_51,  5, 2 },
+    { EncoderFamily::NVENC_AV1, "CQ",  g_presets_255, 5, 2 },
+};
+
+const QualityFamily& get_quality_family(EncoderFamily family) {
+    for (const auto& qf : g_quality_families) {
+        if (qf.family == family) return qf;
+    }
+    return g_quality_families[0]; // fallback to X264_X265
+}
+
 // All known encoders
 static const EncoderInfo g_all_encoders[] = {
-    { L"H.264 (CPU)",        "libx264",    false },
-    { L"H.265 (CPU)",        "libx265",    false },
-    { L"H.264 (AMD GPU)",    "h264_amf",   true },
-    { L"H.265 (AMD GPU)",    "hevc_amf",   true },
-    { L"H.264 (NVIDIA GPU)", "h264_nvenc", true },
-    { L"H.265 (NVIDIA GPU)", "hevc_nvenc", true },
+    { L"H.264 (CPU)",        "libx264",    false, EncoderFamily::X264_X265 },
+    { L"H.265 (CPU)",        "libx265",    false, EncoderFamily::X264_X265 },
+    { L"H.264 (AMD GPU)",    "h264_amf",   true,  EncoderFamily::AMF },
+    { L"H.265 (AMD GPU)",    "hevc_amf",   true,  EncoderFamily::AMF },
+    { L"AV1 (AMD GPU)",      "av1_amf",    true,  EncoderFamily::AMF_AV1 },
+    { L"H.264 (NVIDIA GPU)", "h264_nvenc", true,  EncoderFamily::NVENC },
+    { L"H.265 (NVIDIA GPU)", "hevc_nvenc", true,  EncoderFamily::NVENC },
+    { L"AV1 (NVIDIA GPU)",   "av1_nvenc",  true,  EncoderFamily::NVENC_AV1 },
 };
 
 #ifdef _WIN32
@@ -90,6 +125,11 @@ static std::string build_encoder_flags(const std::string& encoder, int crf) {
         snprintf(buf, sizeof(buf), "-c:v hevc_amf -quality quality -rc cqp -qp_i %d -qp_p %d -pix_fmt yuv420p", crf, crf);
         return buf;
     }
+    if (encoder == "av1_amf") {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "-c:v av1_amf -quality quality -rc cqp -qp_i %d -qp_p %d -pix_fmt yuv420p", crf, crf);
+        return buf;
+    }
     if (encoder == "h264_nvenc") {
         char buf[128];
         snprintf(buf, sizeof(buf), "-c:v h264_nvenc -preset p7 -rc vbr -cq %d -pix_fmt yuv420p", crf);
@@ -98,6 +138,11 @@ static std::string build_encoder_flags(const std::string& encoder, int crf) {
     if (encoder == "hevc_nvenc") {
         char buf[128];
         snprintf(buf, sizeof(buf), "-c:v hevc_nvenc -preset p7 -rc vbr -cq %d -pix_fmt yuv420p", crf);
+        return buf;
+    }
+    if (encoder == "av1_nvenc") {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "-c:v av1_nvenc -preset p7 -rc vbr -cq %d -pix_fmt yuv420p", crf);
         return buf;
     }
     // Fallback: treat as libx264

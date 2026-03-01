@@ -2,7 +2,6 @@ name: Build
 
 on:
   push:
-    branches: [master]
     tags: ['v*']
   pull_request:
     branches: [master]
@@ -21,6 +20,7 @@ jobs:
         run: cmake --build build --config Release
 
       - name: Upload artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: Krec2MP4

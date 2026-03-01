@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <commdlg.h>
+#include <shellapi.h>
 #include <shobjidl.h>
 #include <shlobj.h>
 
@@ -40,8 +41,7 @@ static HWND g_input_path = nullptr;
 static HWND g_batch_check = nullptr;
 static HWND g_output_path = nullptr;
 static HWND g_resolution_combo = nullptr;
-static HWND g_crf_slider = nullptr;
-static HWND g_crf_value = nullptr;
+static HWND g_quality_combo = nullptr;
 static HWND g_fps_edit = nullptr;
 static HWND g_msaa_slider = nullptr;
 static HWND g_msaa_value = nullptr;
@@ -51,6 +51,7 @@ static HWND g_encoder_combo = nullptr;
 static HWND g_verbose_check = nullptr;
 static HWND g_convert_btn = nullptr;
 static HWND g_cancel_btn = nullptr;
+static HWND g_open_folder_btn = nullptr;
 static HWND g_progress_bar = nullptr;
 static HWND g_progress_text = nullptr;
 static HWND g_log_edit = nullptr;
@@ -59,6 +60,9 @@ static HWND g_log_edit = nullptr;
 static std::thread g_worker_thread;
 static std::atomic<bool> g_cancel_flag{false};
 static bool g_converting = false;
+static LARGE_INTEGER g_start_time = {};      // batch start (for total elapsed)
+static LARGE_INTEGER g_file_start_time = {};  // per-file start (for fps/ETA)
+static LARGE_INTEGER g_perf_freq = {};
 
 // Resolution presets
 struct ResPreset {
@@ -75,8 +79,8 @@ static const ResPreset g_res_presets[] = {
 static const int g_num_res_presets = sizeof(g_res_presets) / sizeof(g_res_presets[0]);
 
 // MSAA / Aniso presets: slider position -> value
-static const int g_msaa_values[] = { 0, 2, 4, 8, 16 };
-static const wchar_t* g_msaa_labels[] = { L"Off", L"2x", L"4x", L"8x", L"16x" };
+static const int g_msaa_values[] = { 0, 2, 4, 8 };
+static const wchar_t* g_msaa_labels[] = { L"Off", L"2x", L"4x", L"8x" };
 static const int g_aniso_values[] = { 0, 2, 4, 8, 16 };
 static const wchar_t* g_aniso_labels[] = { L"Off", L"2x", L"4x", L"8x", L"16x" };
 
@@ -128,6 +132,26 @@ static std::wstring GetEditDir(HWND edit) {
     fs::path dir = fs::is_directory(p) ? p : p.parent_path();
     if (fs::is_directory(dir)) return dir.wstring();
     return {};
+}
+
+static EncoderFamily GetSelectedEncoderFamily() {
+    int sel = (int)SendMessageW(g_encoder_combo, CB_GETCURSEL, 0, 0);
+    if (sel >= 0 && sel < (int)g_encoders.size())
+        return g_encoders[sel].family;
+    return EncoderFamily::X264_X265;
+}
+
+static void PopulateQualityCombo(EncoderFamily family) {
+    SendMessageW(g_quality_combo, CB_RESETCONTENT, 0, 0);
+    const QualityFamily& qf = get_quality_family(family);
+    for (int i = 0; i < qf.num_presets; i++) {
+        char label[64];
+        snprintf(label, sizeof(label), "%s (%s %d)",
+                 qf.presets[i].name, qf.param_name, qf.presets[i].value);
+        SendMessageW(g_quality_combo, CB_ADDSTRING, 0,
+                     (LPARAM)Utf8ToWide(label).c_str());
+    }
+    SendMessageW(g_quality_combo, CB_SETCURSEL, qf.default_index, 0);
 }
 
 static std::wstring BrowseFile(HWND owner, const wchar_t* title, const wchar_t* filter, bool save,
@@ -230,10 +254,15 @@ static void SaveSettings() {
             Utf8ToWide(g_encoders[enc_sel].codec).c_str(), file);
     }
 
-    // CRF
-    int crf = (int)SendMessageW(g_crf_slider, TBM_GETPOS, 0, 0);
-    swprintf(num, 16, L"%d", crf);
-    WritePrivateProfileStringW(sec, L"CRF", num, file);
+    // Quality preset
+    {
+        int qsel = (int)SendMessageW(g_quality_combo, CB_GETCURSEL, 0, 0);
+        const QualityFamily& qf = get_quality_family(GetSelectedEncoderFamily());
+        if (qsel >= 0 && qsel < qf.num_presets) {
+            WritePrivateProfileStringW(sec, L"Quality",
+                Utf8ToWide(qf.presets[qsel].name).c_str(), file);
+        }
+    }
 
     // FPS
     GetWindowTextW(g_fps_edit, buf, MAX_PATH);
@@ -291,13 +320,18 @@ static void LoadSettings() {
         }
     }
 
-    // CRF
-    int crf = GetPrivateProfileIntW(sec, L"CRF", 23, file);
-    if (crf >= 0 && crf <= 51) {
-        SendMessageW(g_crf_slider, TBM_SETPOS, TRUE, crf);
-        wchar_t num[8];
-        swprintf(num, 8, L"%d", crf);
-        SetWindowTextW(g_crf_value, num);
+    // Quality preset (repopulate combo for restored encoder, then match saved name)
+    PopulateQualityCombo(GetSelectedEncoderFamily());
+    GetPrivateProfileStringW(sec, L"Quality", L"Medium", buf, MAX_PATH, file);
+    {
+        std::string saved_name = WideToUtf8(buf);
+        const QualityFamily& qf = get_quality_family(GetSelectedEncoderFamily());
+        for (int i = 0; i < qf.num_presets; i++) {
+            if (saved_name == qf.presets[i].name) {
+                SendMessageW(g_quality_combo, CB_SETCURSEL, i, 0);
+                break;
+            }
+        }
     }
 
     // FPS
@@ -306,7 +340,7 @@ static void LoadSettings() {
 
     // MSAA
     int msaa = GetPrivateProfileIntW(sec, L"MSAA", 0, file);
-    if (msaa >= 0 && msaa <= 4) {
+    if (msaa >= 0 && msaa <= 3) {
         SendMessageW(g_msaa_slider, TBM_SETPOS, TRUE, msaa);
         SetWindowTextW(g_msaa_value, g_msaa_labels[msaa]);
     }
@@ -417,14 +451,11 @@ static void CreateControls(HWND hwnd) {
     y += ROW_H + GAP;
 
     CreateLabel(hwnd, L"Quality:", MARGIN, y + 2, LBL_W, ROW_H);
-    g_crf_slider = CreateWindowExW(0, TRACKBAR_CLASSW, L"",
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS,
-        EDIT_X, y, 260, ROW_H + 6, hwnd, (HMENU)(INT_PTR)IDC_CRF_SLIDER, nullptr, nullptr);
-    SendMessageW(g_crf_slider, TBM_SETRANGE, TRUE, MAKELONG(0, 51));
-    SendMessageW(g_crf_slider, TBM_SETPOS, TRUE, 23);
-    SendMessageW(g_crf_slider, TBM_SETTICFREQ, 5, 0);
-    g_crf_value = CreateEdit(hwnd, IDC_CRF_VALUE, EDIT_X + 266, y + 2, 40, ROW_H - 2);
-    SetWindowTextW(g_crf_value, L"23");
+    g_quality_combo = CreateWindowExW(WS_EX_CLIENTEDGE, L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+        EDIT_X, y, 200, 200, hwnd, (HMENU)(INT_PTR)IDC_QUALITY, nullptr, nullptr);
+    SendMessageW(g_quality_combo, WM_SETFONT, (WPARAM)g_font, TRUE);
+    PopulateQualityCombo(GetSelectedEncoderFamily());
     y += ROW_H + GAP + 4;
 
     CreateLabel(hwnd, L"FPS Override:", MARGIN, y + 2, LBL_W, ROW_H);
@@ -438,12 +469,12 @@ static void CreateControls(HWND hwnd) {
     }
     y += ROW_H + GAP;
 
-    // Anti-aliasing (MSAA) slider: positions 0-4 -> Off, 2x, 4x, 8x, 16x
+    // Anti-aliasing (MSAA) slider: positions 0-3 -> Off, 2x, 4x, 8x
     CreateLabel(hwnd, L"Anti-Alias:", MARGIN, y + 2, LBL_W, ROW_H);
     g_msaa_slider = CreateWindowExW(0, TRACKBAR_CLASSW, L"",
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS,
         EDIT_X, y, 200, ROW_H + 6, hwnd, (HMENU)(INT_PTR)IDC_MSAA_SLIDER, nullptr, nullptr);
-    SendMessageW(g_msaa_slider, TBM_SETRANGE, TRUE, MAKELONG(0, 4));
+    SendMessageW(g_msaa_slider, TBM_SETRANGE, TRUE, MAKELONG(0, 3));
     SendMessageW(g_msaa_slider, TBM_SETPOS, TRUE, 0);
     SendMessageW(g_msaa_slider, TBM_SETTICFREQ, 1, 0);
     g_msaa_value = CreateWindowExW(0, L"STATIC", L"Off",
@@ -472,10 +503,13 @@ static void CreateControls(HWND hwnd) {
     y += ROW_H + GAP + 2;
 
     g_convert_btn = CreateBtn(hwnd, L"Convert", IDC_CONVERT_BTN,
-                              MARGIN + 180, y, 120, 32);
+                              MARGIN + 120, y, 120, 32);
     g_cancel_btn = CreateBtn(hwnd, L"Cancel", IDC_CANCEL_BTN,
-                             MARGIN + 310, y, 100, 32);
+                             MARGIN + 250, y, 100, 32);
+    g_open_folder_btn = CreateBtn(hwnd, L"Open Folder", IDC_OPEN_FOLDER_BTN,
+                                  MARGIN + 360, y, 110, 32);
     EnableWindow(g_cancel_btn, FALSE);
+    EnableWindow(g_open_folder_btn, FALSE);
     y += 32 + GAP + 4;
 
     // --- Progress ---
@@ -549,6 +583,11 @@ static void WorkerThread(AppConfig config) {
     for (size_t i = 0; i < krec_files.size(); i++) {
         if (g_cancel_flag.load()) break;
 
+        // Report batch progress
+        if (krec_files.size() > 1) {
+            PostMessageW(g_hwnd, WM_APP_BATCH, (WPARAM)(i + 1), (LPARAM)krec_files.size());
+        }
+
         std::string output;
         if (config.batch) {
             std::string out_dir = config.output_path.empty()
@@ -601,8 +640,13 @@ static AppConfig ReadConfig() {
         cfg.res_height = g_res_presets[sel].h;
     }
 
-    // CRF
-    cfg.crf = (int)SendMessageW(g_crf_slider, TBM_GETPOS, 0, 0);
+    // Quality (read value from selected preset)
+    {
+        int qsel = (int)SendMessageW(g_quality_combo, CB_GETCURSEL, 0, 0);
+        const QualityFamily& qf = get_quality_family(GetSelectedEncoderFamily());
+        if (qsel >= 0 && qsel < qf.num_presets)
+            cfg.crf = qf.presets[qsel].value;
+    }
 
     // FPS
     std::string fps_str = GetEditText(g_fps_edit);
@@ -616,7 +660,7 @@ static AppConfig ReadConfig() {
 
     // Anti-aliasing (MSAA)
     int msaa_pos = (int)SendMessageW(g_msaa_slider, TBM_GETPOS, 0, 0);
-    if (msaa_pos >= 0 && msaa_pos <= 4) cfg.msaa = g_msaa_values[msaa_pos];
+    if (msaa_pos >= 0 && msaa_pos <= 3) cfg.msaa = g_msaa_values[msaa_pos];
 
     // Anisotropic filtering
     int aniso_pos = (int)SendMessageW(g_aniso_slider, TBM_GETPOS, 0, 0);
@@ -643,6 +687,14 @@ static void StartConversion() {
         MessageBoxW(g_hwnd, L"In batch mode, input must be a directory.", L"Validation Error", MB_ICONWARNING);
         return;
     }
+    if (cfg.batch && cfg.output_path.empty()) {
+        MessageBoxW(g_hwnd, L"In batch mode, an output directory is required.", L"Validation Error", MB_ICONWARNING);
+        return;
+    }
+    if (cfg.batch && !fs::is_directory(cfg.output_path)) {
+        MessageBoxW(g_hwnd, L"In batch mode, output must be an existing directory.", L"Validation Error", MB_ICONWARNING);
+        return;
+    }
     if (!cfg.batch && !fs::is_regular_file(cfg.input_path)) {
         MessageBoxW(g_hwnd, L"Input file does not exist.", L"Validation Error", MB_ICONWARNING);
         return;
@@ -656,8 +708,12 @@ static void StartConversion() {
     // Toggle buttons
     EnableWindow(g_convert_btn, FALSE);
     EnableWindow(g_cancel_btn, TRUE);
+    EnableWindow(g_open_folder_btn, FALSE);
     g_converting = true;
     g_cancel_flag.store(false);
+    QueryPerformanceFrequency(&g_perf_freq);
+    QueryPerformanceCounter(&g_start_time);
+    g_file_start_time = g_start_time;
 
     // Launch worker
     if (g_worker_thread.joinable()) g_worker_thread.join();
@@ -675,14 +731,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_HSCROLL: {
         HWND slider = (HWND)lParam;
-        if (slider == g_crf_slider) {
-            int pos = (int)SendMessageW(g_crf_slider, TBM_GETPOS, 0, 0);
-            wchar_t buf[8];
-            swprintf(buf, 8, L"%d", pos);
-            SetWindowTextW(g_crf_value, buf);
-        } else if (slider == g_msaa_slider) {
+        if (slider == g_msaa_slider) {
             int pos = (int)SendMessageW(g_msaa_slider, TBM_GETPOS, 0, 0);
-            if (pos >= 0 && pos <= 4)
+            if (pos >= 0 && pos <= 3)
                 SetWindowTextW(g_msaa_value, g_msaa_labels[pos]);
         } else if (slider == g_aniso_slider) {
             int pos = (int)SendMessageW(g_aniso_slider, TBM_GETPOS, 0, 0);
@@ -696,14 +747,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         int id = LOWORD(wParam);
         int code = HIWORD(wParam);
 
-        // CRF edit -> sync slider
-        if (id == IDC_CRF_VALUE && code == EN_CHANGE) {
-            wchar_t buf[8] = {};
-            GetWindowTextW(g_crf_value, buf, 8);
-            int val = _wtoi(buf);
-            if (val >= 0 && val <= 51) {
-                SendMessageW(g_crf_slider, TBM_SETPOS, TRUE, val);
-            }
+        // Encoder changed -> repopulate quality combo
+        if (id == IDC_ENCODER && code == CBN_SELCHANGE) {
+            PopulateQualityCombo(GetSelectedEncoderFamily());
             return 0;
         }
 
@@ -756,7 +802,32 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 EnableWindow(g_cancel_btn, FALSE);
             }
             break;
+        case IDC_OPEN_FOLDER_BTN: {
+            // Determine output directory
+            std::string out = GetEditText(g_output_path);
+            if (out.empty()) out = GetEditText(g_input_path);
+            if (!out.empty()) {
+                fs::path p(out);
+                fs::path dir = fs::is_directory(p) ? p : p.parent_path();
+                if (fs::is_directory(dir)) {
+                    ShellExecuteW(hwnd, L"open", dir.wstring().c_str(),
+                                  nullptr, nullptr, SW_SHOWNORMAL);
+                }
+            }
+            break;
         }
+        }
+        return 0;
+    }
+
+    case WM_APP_BATCH: {
+        int current_file = (int)wParam;
+        int total_files = (int)lParam;
+        // Reset per-file timer so fps/ETA are accurate for each file
+        QueryPerformanceCounter(&g_file_start_time);
+        wchar_t title[256];
+        swprintf(title, 256, L"Krec2MP4 \u2014 File %d / %d", current_file, total_files);
+        SetWindowTextW(hwnd, title);
         return 0;
     }
 
@@ -790,8 +861,26 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             int pct = (current * 100) / total;
             SendMessageW(g_progress_bar, PBM_SETRANGE32, 0, total);
             SendMessageW(g_progress_bar, PBM_SETPOS, current, 0);
-            wchar_t buf[128];
-            swprintf(buf, 128, L"Frame %d / %d (%d%%)", current, total, pct);
+
+            // Calculate encoding speed and time estimates
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            double elapsed = (double)(now.QuadPart - g_start_time.QuadPart) / g_perf_freq.QuadPart;
+            double file_elapsed = (double)(now.QuadPart - g_file_start_time.QuadPart) / g_perf_freq.QuadPart;
+            double enc_fps = (file_elapsed > 0.0) ? current / file_elapsed : 0.0;
+            double speed_mult = enc_fps / 60.0;
+
+            int remaining = total - current;
+            double eta = (enc_fps > 0.0) ? remaining / enc_fps : 0.0;
+
+            int el_m = (int)elapsed / 60;
+            int el_s = (int)elapsed % 60;
+            int eta_m = (int)eta / 60;
+            int eta_s = (int)eta % 60;
+
+            wchar_t buf[256];
+            swprintf(buf, 256, L"Frame %d / %d (%d%%) \u2014 %.0f fps (%.1fx) \u2014 %d:%02d elapsed, %d:%02d remaining",
+                     current, total, pct, enc_fps, speed_mult, el_m, el_s, eta_m, eta_s);
             SetWindowTextW(g_progress_text, buf);
         }
         return 0;
@@ -805,6 +894,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_converting = false;
         EnableWindow(g_convert_btn, TRUE);
         EnableWindow(g_cancel_btn, FALSE);
+        SetWindowTextW(hwnd, L"Krec2MP4 - N64 Replay to Video Converter");
 
         // Stop marquee mode if active
         LONG pstyle = GetWindowLongW(g_progress_bar, GWL_STYLE);
@@ -813,17 +903,33 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SetWindowLongW(g_progress_bar, GWL_STYLE, pstyle & ~PBS_MARQUEE);
         }
 
+        // Calculate total elapsed time
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        double elapsed = (double)(now.QuadPart - g_start_time.QuadPart) / g_perf_freq.QuadPart;
+        int el_m = (int)elapsed / 60;
+        int el_s = (int)elapsed % 60;
+
         wchar_t buf[256];
         if (g_cancel_flag.load()) {
-            swprintf(buf, 256, L"Cancelled. Success: %d, Failed: %d", success, failed);
+            swprintf(buf, 256, L"Cancelled. Success: %d, Failed: %d (%d:%02d)",
+                     success, failed, el_m, el_s);
         } else {
-            swprintf(buf, 256, L"Done! Success: %d, Failed: %d", success, failed);
+            swprintf(buf, 256, L"Done! Success: %d, Failed: %d (%d:%02d)",
+                     success, failed, el_m, el_s);
         }
         SetWindowTextW(g_progress_text, buf);
 
         if (!g_cancel_flag.load() && failed == 0 && success > 0) {
             SendMessageW(g_progress_bar, PBM_SETRANGE32, 0, 100);
             SendMessageW(g_progress_bar, PBM_SETPOS, 100, 0);
+        }
+
+        // Enable Open Folder if there's an output path
+        std::string out = GetEditText(g_output_path);
+        if (out.empty()) out = GetEditText(g_input_path);
+        if (!out.empty()) {
+            EnableWindow(g_open_folder_btn, TRUE);
         }
         return 0;
     }
@@ -878,7 +984,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
-    wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_APPICON));
+    wc.hIconSm = (HICON)LoadImage(hInstance, MAKEINTRESOURCE(IDI_APPICON),
+                                   IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     wc.lpszClassName = L"Krec2MP4_GUI";
