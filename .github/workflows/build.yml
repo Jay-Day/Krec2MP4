@@ -39,6 +39,7 @@ jobs:
           cp Plugin/*.dll staging/Plugin/
           cp Data/GLideN64.ini staging/Data/
           cp Data/mupen64plus.ini staging/Data/
+          cp *.dll staging/
           cp ffmpeg.exe staging/
 
       - name: Upload artifacts
