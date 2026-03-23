@@ -41,6 +41,7 @@ struct AppConfig {
     std::string encoder = "libx264"; // FFmpeg codec name
     bool batch = false;
     bool verbose = false;
+    bool remove_music = false;
 };
 
 // Get the directory containing the executable

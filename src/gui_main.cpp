@@ -48,6 +48,7 @@ static HWND g_msaa_value = nullptr;
 static HWND g_aniso_slider = nullptr;
 static HWND g_aniso_value = nullptr;
 static HWND g_encoder_combo = nullptr;
+static HWND g_remove_music_check = nullptr;
 static HWND g_verbose_check = nullptr;
 static HWND g_convert_btn = nullptr;
 static HWND g_cancel_btn = nullptr;
@@ -240,6 +241,8 @@ static void SaveSettings() {
     WritePrivateProfileStringW(sec, L"Batch", batch ? L"1" : L"0", file);
     bool verbose = (SendMessageW(g_verbose_check, BM_GETCHECK, 0, 0) == BST_CHECKED);
     WritePrivateProfileStringW(sec, L"Verbose", verbose ? L"1" : L"0", file);
+    bool remove_music = (SendMessageW(g_remove_music_check, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    WritePrivateProfileStringW(sec, L"RemoveMusic", remove_music ? L"1" : L"0", file);
 
     // Resolution (save index)
     int res_sel = (int)SendMessageW(g_resolution_combo, CB_GETCURSEL, 0, 0);
@@ -302,6 +305,8 @@ static void LoadSettings() {
     SendMessageW(g_batch_check, BM_SETCHECK, batch ? BST_CHECKED : BST_UNCHECKED, 0);
     int verbose = GetPrivateProfileIntW(sec, L"Verbose", 0, file);
     SendMessageW(g_verbose_check, BM_SETCHECK, verbose ? BST_CHECKED : BST_UNCHECKED, 0);
+    int remove_music = GetPrivateProfileIntW(sec, L"RemoveMusic", 0, file);
+    SendMessageW(g_remove_music_check, BM_SETCHECK, remove_music ? BST_CHECKED : BST_UNCHECKED, 0);
 
     // Resolution
     int res_sel = GetPrivateProfileIntW(sec, L"Resolution", 1, file);
@@ -497,6 +502,11 @@ static void CreateControls(HWND hwnd) {
     SendMessageW(g_aniso_value, WM_SETFONT, (WPARAM)g_font, TRUE);
     y += ROW_H + GAP + 4;
 
+    // --- Game-specific options ---
+    g_remove_music_check = CreateCheck(hwnd, L"Remove background music (SSB64)",
+                                        IDC_REMOVE_MUSIC_CHECK, EDIT_X, y, 280, ROW_H);
+    y += ROW_H + GAP;
+
     // --- Verbose + buttons ---
     g_verbose_check = CreateCheck(hwnd, L"Verbose logging", IDC_VERBOSE_CHECK,
                                   EDIT_X, y, 160, ROW_H);
@@ -625,6 +635,7 @@ static AppConfig ReadConfig() {
     cfg.output_path = GetEditText(g_output_path);
     cfg.batch = (SendMessageW(g_batch_check, BM_GETCHECK, 0, 0) == BST_CHECKED);
     cfg.verbose = (SendMessageW(g_verbose_check, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    cfg.remove_music = (SendMessageW(g_remove_music_check, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
     // Default paths relative to exe
     std::string exe_dir = get_exe_dir();
@@ -994,7 +1005,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
     // Calculate window size to fit client area
     const int CLIENT_W = 620;
-    const int CLIENT_H = 670;
+    const int CLIENT_H = 700;
     RECT rc = { 0, 0, CLIENT_W, CLIENT_H };
     AdjustWindowRectEx(&rc, WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX), FALSE, 0);
 

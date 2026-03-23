@@ -21,6 +21,8 @@
 #define IDC_ANISO_VALUE     208
 #define IDC_ENCODER         209
 
+#define IDC_REMOVE_MUSIC_CHECK 301
+
 #define IDC_VERBOSE_CHECK   401
 #define IDC_CONVERT_BTN     402
 #define IDC_CANCEL_BTN      403

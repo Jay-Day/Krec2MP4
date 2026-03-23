@@ -101,6 +101,12 @@ struct pif {
 
 typedef void (*pif_sync_callback_t)(struct pif*);
 
+// Cheat code structure
+typedef struct {
+    uint32_t address;
+    int      value;
+} m64p_cheat_code;
+
 } // extern "C"
 
 // Mupen64plus core function pointer types
@@ -127,6 +133,10 @@ typedef m64p_error (*ptr_ConfigSetDefaultString)(m64p_handle, const char*, const
 // Plugin function types
 typedef m64p_error (*ptr_PluginStartup)(m64p_dynlib_handle, void*, ptr_DebugCallback);
 typedef m64p_error (*ptr_PluginShutdown)(void);
+
+// Cheat API
+typedef m64p_error (*ptr_CoreAddCheat)(const char*, m64p_cheat_code*, int);
+typedef m64p_error (*ptr_CoreCheatEnabled)(const char*, int);
 
 // RMG-K extension
 typedef void (*ptr_set_pif_sync_callback)(pif_sync_callback_t);
@@ -158,6 +168,7 @@ public:
     bool open_rom(const std::string& rom_path);
     bool attach_plugins();
     void apply_deterministic_settings();
+    bool apply_cheat(const char* name, m64p_cheat_code* codes, int num_codes);
     void configure_controllers_for_replay(int num_players);
     void set_pif_callback(pif_sync_callback_t callback);
     void set_frame_callback(m64p_frame_callback callback);
@@ -186,6 +197,7 @@ private:
     ptr_ConfigOpenSection config_open_section = nullptr;
     ptr_ConfigSetParameter config_set_parameter = nullptr;
     ptr_set_pif_sync_callback set_pif_callback_fn = nullptr;
+    ptr_CoreAddCheat core_add_cheat = nullptr;
     ptr_ReadScreen2 read_screen2 = nullptr;
 
     bool verbose = false;
