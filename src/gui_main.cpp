@@ -39,6 +39,9 @@ static HFONT g_font = nullptr;
 static HWND g_rom_path = nullptr;
 static HWND g_input_path = nullptr;
 static HWND g_batch_check = nullptr;
+static HWND g_batch_list = nullptr;
+static HWND g_batch_select_all = nullptr;
+static HWND g_batch_deselect_all = nullptr;
 static HWND g_output_path = nullptr;
 static HWND g_resolution_combo = nullptr;
 static HWND g_quality_combo = nullptr;
@@ -415,9 +418,42 @@ static void CreateControls(HWND hwnd) {
     CreateBtn(hwnd, L"Browse...", IDC_INPUT_BROWSE, EDIT_X + EDIT_W + GAP, y, BTN_W, ROW_H);
     y += ROW_H + GAP;
 
-    g_batch_check = CreateCheck(hwnd, L"Batch mode (process all .krec in folder)",
+    g_batch_check = CreateCheck(hwnd, L"Batch mode (process .krec files in folder)",
                                 IDC_BATCH_CHECK, EDIT_X, y, EDIT_W, ROW_H);
     y += ROW_H + GAP;
+
+    // Batch file list (hidden by default, shown when batch mode is checked)
+    g_batch_select_all = CreateBtn(hwnd, L"Select All", IDC_BATCH_SELECT_ALL,
+                                    EDIT_X, y, 80, ROW_H);
+    g_batch_deselect_all = CreateBtn(hwnd, L"Deselect All", IDC_BATCH_DESELECT_ALL,
+                                      EDIT_X + 86, y, 90, ROW_H);
+    ShowWindow(g_batch_select_all, SW_HIDE);
+    ShowWindow(g_batch_deselect_all, SW_HIDE);
+    y += ROW_H + 2;
+
+    g_batch_list = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+        WS_CHILD | LVS_REPORT | LVS_NOSORTHEADER | LVS_SHOWSELALWAYS,
+        EDIT_X, y, CLIENT_W - EDIT_X - MARGIN, 150,
+        hwnd, (HMENU)(INT_PTR)IDC_BATCH_LIST, nullptr, nullptr);
+    SendMessageW(g_batch_list, WM_SETFONT, (WPARAM)g_font, TRUE);
+    ListView_SetExtendedListViewStyle(g_batch_list,
+        LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT);
+    {
+        int list_w = CLIENT_W - EDIT_X - MARGIN - 24; // leave room for scrollbar
+        LVCOLUMNW col = {};
+        col.mask = LVCF_TEXT | LVCF_WIDTH;
+        col.pszText = (LPWSTR)L"Filename";
+        col.cx = list_w * 5 / 12;
+        SendMessageW(g_batch_list, LVM_INSERTCOLUMNW, 0, (LPARAM)&col);
+        col.pszText = (LPWSTR)L"Game";
+        col.cx = list_w * 4 / 12;
+        SendMessageW(g_batch_list, LVM_INSERTCOLUMNW, 1, (LPARAM)&col);
+        col.pszText = (LPWSTR)L"Date";
+        col.cx = list_w * 3 / 12;
+        SendMessageW(g_batch_list, LVM_INSERTCOLUMNW, 2, (LPARAM)&col);
+    }
+    ShowWindow(g_batch_list, SW_HIDE);
+    y += 150 + GAP;
 
     CreateLabel(hwnd, L"Output:", MARGIN, y + 2, LBL_W, ROW_H);
     g_output_path = CreateEdit(hwnd, IDC_OUTPUT_PATH, EDIT_X, y, EDIT_W, ROW_H);
@@ -503,7 +539,7 @@ static void CreateControls(HWND hwnd) {
     y += ROW_H + GAP + 4;
 
     // --- Game-specific options ---
-    g_remove_music_check = CreateCheck(hwnd, L"Remove background music (SSB64)",
+    g_remove_music_check = CreateCheck(hwnd, L"Remove background music (Remix 2.0.1)",
                                         IDC_REMOVE_MUSIC_CHECK, EDIT_X, y, 280, ROW_H);
     y += ROW_H + GAP;
 
@@ -551,6 +587,110 @@ static void CreateControls(HWND hwnd) {
     SendMessageW(g_log_edit, WM_SETFONT, (WPARAM)g_font, TRUE);
 }
 
+// --- Batch file list helpers ---
+
+struct KrecHeader {
+    std::string game;
+    uint32_t timestamp = 0;
+};
+
+static KrecHeader ReadKrecHeader(const std::string& path) {
+    KrecHeader hdr;
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return hdr;
+    // Game name at offset 132, 128 bytes
+    char buf[128] = {};
+    if (fseek(f, 132, SEEK_SET) == 0)
+        fread(buf, 1, 127, f);
+    buf[127] = 0;
+    hdr.game = buf;
+    // Timestamp at offset 260, 4 bytes
+    if (fseek(f, 260, SEEK_SET) == 0)
+        fread(&hdr.timestamp, 4, 1, f);
+    fclose(f);
+    return hdr;
+}
+
+static void PopulateBatchList() {
+    ListView_DeleteAllItems(g_batch_list);
+    std::string dir = GetEditText(g_input_path);
+    if (dir.empty() || !fs::is_directory(dir)) return;
+
+    // Collect entries with header info
+    struct KrecEntry {
+        std::wstring filename;
+        std::wstring game;
+        std::wstring date;
+        uint32_t timestamp;
+    };
+    std::vector<KrecEntry> entries;
+    for (auto& entry : fs::directory_iterator(dir)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".krec") {
+            KrecHeader hdr = ReadKrecHeader(entry.path().string());
+            std::wstring date_str;
+            if (hdr.timestamp > 0) {
+                time_t t = (time_t)hdr.timestamp;
+                struct tm* tm = localtime(&t);
+                if (tm) {
+                    char tbuf[64];
+                    strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M", tm);
+                    date_str = Utf8ToWide(tbuf);
+                }
+            }
+            entries.push_back({entry.path().filename().wstring(),
+                               Utf8ToWide(hdr.game), date_str, hdr.timestamp});
+        }
+    }
+    // Sort newest first
+    std::sort(entries.begin(), entries.end(),
+              [](const KrecEntry& a, const KrecEntry& b) {
+                  return a.timestamp > b.timestamp;
+              });
+
+    SendMessageW(g_batch_list, WM_SETREDRAW, FALSE, 0);
+    for (size_t i = 0; i < entries.size(); i++) {
+        LVITEMW item = {};
+        item.mask = LVIF_TEXT;
+        item.iItem = (int)i;
+        item.pszText = (LPWSTR)entries[i].filename.c_str();
+        SendMessageW(g_batch_list, LVM_INSERTITEMW, 0, (LPARAM)&item);
+        // Game name column
+        LVITEMW sub = {};
+        sub.iItem = (int)i;
+        sub.iSubItem = 1;
+        sub.pszText = (LPWSTR)entries[i].game.c_str();
+        SendMessageW(g_batch_list, LVM_SETITEMTEXTW, (WPARAM)i, (LPARAM)&sub);
+        // Date column
+        sub.iSubItem = 2;
+        sub.pszText = (LPWSTR)entries[i].date.c_str();
+        SendMessageW(g_batch_list, LVM_SETITEMTEXTW, (WPARAM)i, (LPARAM)&sub);
+        ListView_SetCheckState(g_batch_list, (int)i, TRUE);
+    }
+    SendMessageW(g_batch_list, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(g_batch_list, nullptr, TRUE);
+}
+
+static void UpdateBatchListVisibility() {
+    bool batch = (SendMessageW(g_batch_check, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    int show = batch ? SW_SHOW : SW_HIDE;
+    ShowWindow(g_batch_list, show);
+    ShowWindow(g_batch_select_all, show);
+    ShowWindow(g_batch_deselect_all, show);
+    if (batch) {
+        PopulateBatchList();
+        // Adjust output path to folder (strip filename if present)
+        std::string out = GetEditText(g_output_path);
+        if (!out.empty()) {
+            fs::path p(out);
+            if (!fs::is_directory(p) && p.has_parent_path()) {
+                SetEditText(g_output_path, p.parent_path().string());
+            }
+        }
+    } else {
+        ListView_DeleteAllItems(g_batch_list);
+    }
+}
+
 // --- Worker thread ---
 
 static void WorkerThread(AppConfig config) {
@@ -578,11 +718,7 @@ static void WorkerThread(AppConfig config) {
     std::vector<std::string> krec_files;
 
     if (config.batch) {
-        for (auto& entry : fs::directory_iterator(config.input_path)) {
-            if (entry.is_regular_file() && entry.path().extension() == ".krec") {
-                krec_files.push_back(entry.path().string());
-            }
-        }
+        krec_files = std::move(config.batch_files);
     } else {
         krec_files.push_back(config.input_path);
     }
@@ -634,6 +770,22 @@ static AppConfig ReadConfig() {
     cfg.input_path = GetEditText(g_input_path);
     cfg.output_path = GetEditText(g_output_path);
     cfg.batch = (SendMessageW(g_batch_check, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    if (cfg.batch) {
+        int count = ListView_GetItemCount(g_batch_list);
+        for (int i = 0; i < count; i++) {
+            if (ListView_GetCheckState(g_batch_list, i)) {
+                wchar_t buf[MAX_PATH] = {};
+                LVITEMW lvi = {};
+                lvi.iSubItem = 0;
+                lvi.pszText = buf;
+                lvi.cchTextMax = MAX_PATH;
+                SendMessageW(g_batch_list, LVM_GETITEMTEXTW, (WPARAM)i, (LPARAM)&lvi);
+                std::string filename = WideToUtf8(buf);
+                cfg.batch_files.push_back(
+                    (fs::path(cfg.input_path) / filename).string());
+            }
+        }
+    }
     cfg.verbose = (SendMessageW(g_verbose_check, BM_GETCHECK, 0, 0) == BST_CHECKED);
     cfg.remove_music = (SendMessageW(g_remove_music_check, BM_GETCHECK, 0, 0) == BST_CHECKED);
 
@@ -706,6 +858,10 @@ static void StartConversion() {
         MessageBoxW(g_hwnd, L"In batch mode, output must be an existing directory.", L"Validation Error", MB_ICONWARNING);
         return;
     }
+    if (cfg.batch && cfg.batch_files.empty()) {
+        MessageBoxW(g_hwnd, L"No files selected for conversion.", L"Validation Error", MB_ICONWARNING);
+        return;
+    }
     if (!cfg.batch && !fs::is_regular_file(cfg.input_path)) {
         MessageBoxW(g_hwnd, L"Input file does not exist.", L"Validation Error", MB_ICONWARNING);
         return;
@@ -738,6 +894,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_CREATE:
         CreateControls(hwnd);
         LoadSettings();
+        UpdateBatchListVisibility();
         return 0;
 
     case WM_HSCROLL: {
@@ -764,6 +921,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        // Batch checkbox toggled -> show/hide file list
+        if (id == IDC_BATCH_CHECK && code == BN_CLICKED) {
+            UpdateBatchListVisibility();
+            return 0;
+        }
+
+        // Input path lost focus while in batch mode -> repopulate list
+        if (id == IDC_INPUT_PATH && code == EN_KILLFOCUS) {
+            bool batch = (SendMessageW(g_batch_check, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            if (batch) PopulateBatchList();
+            return 0;
+        }
+
         switch (id) {
         case IDC_ROM_BROWSE: {
             std::wstring dir = GetEditDir(g_rom_path);
@@ -779,13 +949,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             if (batch) {
                 auto f = BrowseFolder(hwnd, L"Select input folder",
                     dir.empty() ? nullptr : dir.c_str());
-                if (!f.empty()) SetWindowTextW(g_input_path, f.c_str());
+                if (!f.empty()) {
+                    SetWindowTextW(g_input_path, f.c_str());
+                    PopulateBatchList();
+                }
             } else {
                 auto f = BrowseFile(hwnd, L"Select .krec file",
                     L"Krec Files (*.krec)\0*.krec\0All Files\0*.*\0", false,
                     nullptr, dir.empty() ? nullptr : dir.c_str());
                 if (!f.empty()) SetWindowTextW(g_input_path, f.c_str());
             }
+            break;
+        }
+        case IDC_BATCH_SELECT_ALL: {
+            int count = ListView_GetItemCount(g_batch_list);
+            for (int i = 0; i < count; i++)
+                ListView_SetCheckState(g_batch_list, i, TRUE);
+            break;
+        }
+        case IDC_BATCH_DESELECT_ALL: {
+            int count = ListView_GetItemCount(g_batch_list);
+            for (int i = 0; i < count; i++)
+                ListView_SetCheckState(g_batch_list, i, FALSE);
             break;
         }
         case IDC_OUTPUT_BROWSE: {
@@ -1005,7 +1190,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
     // Calculate window size to fit client area
     const int CLIENT_W = 620;
-    const int CLIENT_H = 700;
+    const int CLIENT_H = 882;
     RECT rc = { 0, 0, CLIENT_W, CLIENT_H };
     AdjustWindowRectEx(&rc, WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX), FALSE, 0);
 

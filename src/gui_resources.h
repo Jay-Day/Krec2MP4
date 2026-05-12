@@ -11,6 +11,9 @@
 #define IDC_BATCH_CHECK     105
 #define IDC_OUTPUT_PATH     106
 #define IDC_OUTPUT_BROWSE   107
+#define IDC_BATCH_LIST      108
+#define IDC_BATCH_SELECT_ALL   109
+#define IDC_BATCH_DESELECT_ALL 110
 
 #define IDC_RESOLUTION      201
 #define IDC_QUALITY         202
