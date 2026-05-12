@@ -78,6 +78,9 @@ bool Emulator::load_core(const std::string& path) {
     RESOLVE(config_open_section, ptr_ConfigOpenSection, "ConfigOpenSection");
     RESOLVE(config_set_parameter, ptr_ConfigSetParameter, "ConfigSetParameter");
 
+    // Optional cheat API
+    core_add_cheat = (ptr_CoreAddCheat)GET_PROC(core_handle, "CoreAddCheat");
+
     // Optional RMG-K extension
     set_pif_callback_fn = (ptr_set_pif_sync_callback)GET_PROC(core_handle, "set_pif_sync_callback");
     if (!set_pif_callback_fn) {
@@ -331,6 +334,19 @@ void Emulator::apply_deterministic_settings() {
 
     // GLideN64 settings (resolution, MSAA, aniso) are configured
     // via GLideN64.ini in configure_gliden64(), called during init().
+}
+
+bool Emulator::apply_cheat(const char* name, m64p_cheat_code* codes, int num_codes) {
+    if (!core_add_cheat) {
+        fprintf(stderr, "Warning: CoreAddCheat not available in this core build\n");
+        return false;
+    }
+    m64p_error ret = core_add_cheat(name, codes, num_codes);
+    if (ret != M64ERR_SUCCESS) {
+        fprintf(stderr, "Error: CoreAddCheat('%s') failed (error %d)\n", name, ret);
+        return false;
+    }
+    return true;
 }
 
 void Emulator::configure_controllers_for_replay(int num_players) {

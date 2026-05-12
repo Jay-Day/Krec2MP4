@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <vector>
 #include <functional>
 #include <atomic>
 
@@ -40,7 +41,9 @@ struct AppConfig {
     int aniso = 0;      // 0=off, 2, 4, 8, 16
     std::string encoder = "libx264"; // FFmpeg codec name
     bool batch = false;
+    std::vector<std::string> batch_files; // selected files for batch mode
     bool verbose = false;
+    bool remove_music = false;
 };
 
 // Get the directory containing the executable

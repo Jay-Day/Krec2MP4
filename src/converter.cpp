@@ -351,6 +351,18 @@ bool convert_one(const std::string& krec_path, const std::string& output_path,
 
     emu.apply_deterministic_settings();
 
+    // Apply GameShark cheats if requested
+    if (config.remove_music) {
+        m64p_cheat_code no_music[] = {
+            {0x81462BE2, 0x0000},
+        };
+        if (emu.apply_cheat("NoMusic", no_music, 1)) {
+            converter_log(LOG_INFO, "Applied 'Remove Background Music' cheat.");
+        } else {
+            converter_log(LOG_WARNING, "Warning: failed to apply music removal cheat.");
+        }
+    }
+
     // Setup FFmpeg encoder config (video only, to temp file)
     // Encoder is opened lazily on first frame to match actual render dimensions
     FFmpegEncoder encoder;

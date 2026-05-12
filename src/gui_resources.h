@@ -11,6 +11,9 @@
 #define IDC_BATCH_CHECK     105
 #define IDC_OUTPUT_PATH     106
 #define IDC_OUTPUT_BROWSE   107
+#define IDC_BATCH_LIST      108
+#define IDC_BATCH_SELECT_ALL   109
+#define IDC_BATCH_DESELECT_ALL 110
 
 #define IDC_RESOLUTION      201
 #define IDC_QUALITY         202
@@ -20,6 +23,8 @@
 #define IDC_ANISO_SLIDER    207
 #define IDC_ANISO_VALUE     208
 #define IDC_ENCODER         209
+
+#define IDC_REMOVE_MUSIC_CHECK 301
 
 #define IDC_VERBOSE_CHECK   401
 #define IDC_CONVERT_BTN     402

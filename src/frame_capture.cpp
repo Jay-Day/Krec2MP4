@@ -41,7 +41,7 @@ static FFmpegConfig s_ff_config;
 static bool s_encoder_opened = false;
 static int s_captured_frames = 0;
 static int s_total_frames = 0;
-static bool s_speed_limiter_disabled = false;
+static bool s_speed_set = false;
 static ProgressCallback s_progress_callback;
 static std::atomic<bool>* s_cancel_flag = nullptr;
 
@@ -194,7 +194,7 @@ void frame_capture_init(Emulator* emu, FFmpegEncoder* encoder, const FFmpegConfi
     s_encoder_opened = false;
     s_captured_frames = 0;
     s_total_frames = total_frames;
-    s_speed_limiter_disabled = false;
+    s_speed_set = false;
     // Keep buffers allocated across batch runs to avoid reallocation
     s_progress_callback = nullptr;
     s_cancel_flag = nullptr;
@@ -235,10 +235,10 @@ void frame_capture_callback(unsigned int frame_index) {
     }
 
     // Disable speed limiter on first frame for maximum conversion speed
-    if (!s_speed_limiter_disabled && s_emu) {
+    if (!s_speed_set && s_emu) {
         int limiter = 0; // 0 = off
         s_emu->core_do_command(M64CMD_CORE_STATE_SET, M64CORE_SPEED_LIMITER, &limiter);
-        s_speed_limiter_disabled = true;
+        s_speed_set = true;
     }
 
     // Reset PIF sync flag for next frame
